@@ -1,6 +1,6 @@
 /* Shared league state is supplied by /api/league. This file intentionally keeps
    the original visual UI while replacing browser-local scoring and passwords. */
-let apiReady=false, needsSetup=false;
+let apiReady=false, needsSetup=false, stagedRules=[];
 
 async function api(action, payload={}) {
   const response=await fetch('/api/league'+(action==='state'||action==='session'?`?action=${action}`:''),{
@@ -33,6 +33,29 @@ function decorateBrand(){
   if(Math.max(...db.episodes)>=13)document.querySelector('#new-episode')?.classList.add('hidden');
 }
 
+function admin(){
+  const available=db.contestants.filter(person=>person.status==='active');
+  const updateCount=selected.length*stagedRules.length;
+  return `<div class="shell">${nav()}<div class="admin-wrap" style="margin-top:28px"><aside class="card admin-side"><h3 style="margin-top:0">Episodes</h3><div class="episode-list">${db.episodes.map(number=>`<button data-admin-episode="${number}" class="${activeEpisode===number?'active':''}">Episode ${number}</button>`).join('')}</div></aside><main class="card admin-content"><div class="admin-header"><div><div class="eyebrow">Score episode</div><h2>Episode ${activeEpisode}</h2></div><button class="ghost" id="clear-draft">Clear draft</button></div><div class="small">1. SELECT CONTESTANT${selected.length>1?'S':''} — ${selected.length} SELECTED</div><section class="contestant-picker">${available.map(person=>`<button class="contestant-btn ${selected.includes(person.id)?'selected':''}" data-pick="${person.id}">${esc(person.name)}<small>${esc(team(person.teamId).name)} · ${score(person.id)} pts</small></button>`).join('')}</section><div style="display:flex;gap:9px;margin-top:13px"><button class="danger" id="mark-out">Mark selected eliminated</button><button class="ghost" id="restore-player">Restore eliminated contestant</button></div><div class="small" style="margin-top:24px">2. TOGGLE EVERY EVENT THAT HAPPENED — ${stagedRules.length} SELECTED</div><section class="event-grid">${Object.entries(RULES).map(([key,rule])=>`<button class="event-btn ${stagedRules.includes(key)?'selected':''}" data-rule="${key}" aria-pressed="${stagedRules.includes(key)}">${rule.label}<b>${rule.pts>0?'+':''}${rule.pts} PTS</b></button>`).join('')}</section><button class="primary" id="submit-draft" style="margin-top:20px;width:100%;padding:14px" ${updateCount?'':'disabled'}>${updateCount?`Enter ${updateCount} scoring update${updateCount===1?'':'s'}`:'Select a contestant and event'}</button><section class="history"><div class="section-title">Episode history <span class="small">UNDO OR CORRECT</span></div><table><thead><tr><th>CONTESTANT</th><th>EVENT</th><th>POINTS</th><th></th></tr></thead><tbody>${db.events.filter(event=>event.episode===activeEpisode).slice().reverse().map(event=>`<tr><td>${esc(person(event.contestantId).name)}</td><td>${esc(event.label)}</td><td style="color:${event.points<0?'#ec6e57':'var(--gold)'}">${event.points>0?'+':''}${event.points}</td><td><button class="danger" data-delete="${event.id}">Undo</button></td></tr>`).join('')||'<tr><td colspan="4" class="small">No events recorded for this episode.</td></tr>'}</tbody></table></section></main></div></div>`;
+}
+
+function submitDraft(){
+  if(!selected.length||!stagedRules.length)return toast('Select a contestant and at least one event.');
+  let applied=0;
+  for(const contestantId of selected){
+    for(const rule of stagedRules){
+      const definition=RULES[rule],contestant=person(contestantId);
+      if(definition.uniqueEpisode&&db.events.some(event=>event.episode===activeEpisode&&event.contestantId===contestantId&&event.rule===rule)){toast(`Cry is already recorded for ${contestant.name}.`);continue}
+      if(definition.once&&contestant[definition.once]){toast(`${contestant.name} already has that milestone.`);continue}
+      db.events.push({id:crypto.randomUUID(),episode:activeEpisode,contestantId,rule,label:definition.label,points:definition.pts});
+      if(definition.once)contestant[definition.once]=true;
+      if(rule==='coinLoss'){contestant.status='eliminated';contestant.eliminatedEpisode=activeEpisode}
+      applied++;
+    }
+  }
+  if(applied){selected=[];stagedRules=[];save();render();toast(`${applied} scoring update${applied===1?'':'s'} submitted.`)}
+}
+
 function bind(){
   document.querySelectorAll('[data-page]').forEach(button=>button.onclick=()=>{page=button.dataset.page;render()});
   document.querySelectorAll('[data-contestant]').forEach(button=>button.onclick=()=>{page='profile:'+button.dataset.contestant;render()});
@@ -51,13 +74,14 @@ function bind(){
     event.preventDefault();const form=new FormData(event.target),name=form.get('name').trim(),password=form.get('password');
     try{await api('settings',{name,password});current().name=name;render();toast('Settings saved.')}catch(error){toast(error.message)}
   });
-  document.querySelectorAll('[data-admin-episode]').forEach(button=>button.onclick=()=>{activeEpisode=+button.dataset.adminEpisode;selected=[];render()});
+  document.querySelectorAll('[data-admin-episode]').forEach(button=>button.onclick=()=>{activeEpisode=+button.dataset.adminEpisode;selected=[];stagedRules=[];render()});
   document.querySelector('#new-episode')?.addEventListener('click',()=>{if(Math.max(...db.episodes)>=13)return toast('Season 51 ends at Episode 13.');db.episodes.push(Math.max(...db.episodes)+1);activeEpisode=Math.max(...db.episodes);save();render()});
-  document.querySelector('#clear-select')?.addEventListener('click',()=>{selected=[];render()});
+  document.querySelector('#clear-draft')?.addEventListener('click',()=>{selected=[];stagedRules=[];render()});
   document.querySelectorAll('[data-pick]').forEach(button=>button.onclick=()=>{const id=button.dataset.pick;selected=selected.includes(id)?selected.filter(value=>value!==id):[...selected,id];render()});
   document.querySelector('#mark-out')?.addEventListener('click',()=>{if(!selected.length)return toast('Select a contestant first.');selected.forEach(id=>{const p=person(id);p.status='eliminated';p.eliminatedEpisode=activeEpisode});selected=[];save();render();toast('Contestant status updated.')});
   document.querySelector('#restore-player')?.addEventListener('click',()=>{const p=db.contestants.find(item=>item.status==='eliminated');if(!p)return toast('No eliminated contestant to restore.');p.status='active';p.eliminatedEpisode=null;save();render();toast(p.name+' restored to active.')});
-  document.querySelectorAll('[data-rule]').forEach(button=>button.onclick=()=>addEvent(button.dataset.rule));
+  document.querySelectorAll('[data-rule]').forEach(button=>button.onclick=()=>{const rule=button.dataset.rule;stagedRules=stagedRules.includes(rule)?stagedRules.filter(value=>value!==rule):[...stagedRules,rule];render()});
+  document.querySelector('#submit-draft')?.addEventListener('click',submitDraft);
   document.querySelectorAll('[data-delete]').forEach(button=>button.onclick=()=>{const entry=db.events.find(item=>item.id===button.dataset.delete),rule=RULES[entry.rule];if(rule.once)person(entry.contestantId)[rule.once]=db.events.some(item=>item.id!==entry.id&&item.contestantId===entry.contestantId&&item.rule===entry.rule);if(entry.rule==='coinLoss'){const p=person(entry.contestantId);p.status='active';p.eliminatedEpisode=null}db.events=db.events.filter(item=>item.id!==entry.id);save();render();toast('Event removed — totals updated.')});
 }
 
